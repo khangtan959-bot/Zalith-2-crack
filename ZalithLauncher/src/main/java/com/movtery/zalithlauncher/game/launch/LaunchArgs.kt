@@ -1,6 +1,6 @@
 /*
- * Zalith Launcher 2 - Unlocked Edition
- * Modified to ensure offline session parameters are correctly passed to Minecraft.
+ * Zalith Launcher 2 - Unlocked & Fixed Classpath
+ * This version restores the original library loading logic while keeping the offline bypass.
  */
 
 package com.movtery.zalithlauncher.game.launch
@@ -23,9 +23,11 @@ import com.movtery.zalithlauncher.game.versioninfo.models.GameManifest
 import com.movtery.zalithlauncher.info.InfoDistributor
 import com.movtery.zalithlauncher.path.LibPath
 import com.movtery.zalithlauncher.path.PathManager
-import com.movtery.zalithlauncher.utils.network.ServerAddress
+import com.movtery.zalithlauncher.utils.logging.Logger.lDebug
+import com.movtery.zalithlauncher.utils.logging.Logger.lInfo
+import com.movtery.zalithlauncher.utils.logging.Logger.lWarning
 import com.movtery.zalithlauncher.utils.string.insertJSONValueList
-import com.movtery.zalithlauncher.utils.string.toUnicodeEscaped
+import com.movtery.zalithlauncher.utils.string.isNotEmptyOrBlank
 import java.io.File
 
 class LaunchArgs(
@@ -39,23 +41,20 @@ class LaunchArgs(
     private val readAssetsFile: (path: String) -> String,
     private val getCacioJavaArgs: (isJava8: Boolean) -> List<String>
 ) {
-    // ... [Các hàm getAllArgs giữ nguyên logic ban đầu] ...
     fun getAllArgs(): List<String> {
         val argsList: MutableList<String> = ArrayList()
         argsList.addAll(getJavaArgs())
         argsList.addAll(getMinecraftJVMArgs())
-        // ... (phần này giữ nguyên như file cũ của bạn)
+        // Native plugins
         argsList.add(gameManifest.mainClass)
         argsList.addAll(getMinecraftClientArgs())
-        // ... (phần quickplay giữ nguyên)
         return argsList
     }
 
     private fun getJavaArgs(): List<String> {
         val argsList: MutableList<String> = ArrayList()
-
-        // MODIFIED: Luôn ưu tiên xử lý như tài khoản Local để kích hoạt Skin offline nếu có
-        if (account.isLocalAccount() || true) { 
+        // Offline Skin logic
+        if (account.isLocalAccount()) {
             if (account.hasSkinFile) {
                 offlineServer.start()
                 offlineServer.addCharacter(account)
@@ -65,22 +64,82 @@ class LaunchArgs(
                 }
             }
         } else if (account.isAuthServerAccount()) {
-            // ... (giữ nguyên logic auth server)
+            argsList.add("-javaagent:${LibPath.AUTHLIB_INJECTOR.absolutePath}=${account.otherBaseUrl}")
+            argsList.add("-Dauthlibinjector.side=client")
         }
-
         argsList.addAll(getCacioJavaArgs(runtime.javaVersion == 8))
-        // ... (phần log4j giữ nguyên)
+        argsList.add("-Dminecraft.client.jar=${version.getClientJar().absolutePath}")
         return argsList
+    }
+
+    private fun getMinecraftJVMArgs(): Array<String> {
+        val manifest = getGameManifest(version, true)
+        val varArgMap: MutableMap<String, String> = ArrayMap()
+        
+        // PHẦN QUAN TRỌNG: Khôi phục lại classpath đầy đủ
+        val launchClassPath = "${getLWJGL3ClassPath()}:${generateLaunchClassPath(manifest)}"
+        var hasClasspathInArgs = false
+
+        varArgMap["classpath_separator"] = ":"
+        varArgMap["library_directory"] = getLibrariesHome()
+        varArgMap["version_name"] = manifest.id
+        varArgMap["natives_directory"] = runtimeLibraryPath
+        setLauncherInfo(varArgMap)
+
+        val rawJvmArgs = manifest.arguments?.jvm?.mapNotNull { arg ->
+            if (arg is String) {
+                if (arg == "\${classpath}") {
+                    hasClasspathInArgs = true
+                    launchClassPath
+                } else arg
+            } else null
+        }?.toTypedArray() ?: emptyArray()
+
+        val replacedArgs = insertJSONValueList(rawJvmArgs, varArgMap)
+        return if (hasClasspathInArgs) replacedArgs else replacedArgs + arrayOf("-cp", launchClassPath)
+    }
+
+    private fun generateLaunchClassPath(gameManifest: GameManifest): String {
+        val classpathList = mutableListOf<String>()
+        val libs = generateLibClasspath(gameManifest)
+        
+        for (jarFile in libs) {
+            if (File(jarFile).exists()) classpathList.add(jarFile)
+        }
+        
+        val clientJar = version.getClientJar()
+        if (clientJar.exists()) classpathList.add(clientJar.absolutePath)
+        
+        return classpathList.joinToString(":")
+    }
+
+    private fun generateLibClasspath(gameManifest: GameManifest): Array<String> {
+        val libs = LinkedHashMap<GameManifest.Library, String>()
+        for (libItem in gameManifest.libraries) {
+            if (!(GameManifest.Rule.checkRules(libItem.rules) && !libItem.isNative)) continue
+            val path = libItem.progressLibrary() ?: continue
+            libs[libItem] = getLibrariesHome() + "/" + path
+        }
+        return libs.values.toTypedArray()
+    }
+
+    private fun GameManifest.Library.progressLibrary(): String? {
+        if (filterLibrary()) return null
+        var path = artifactToPath(this)
+        val nameParts = name.split(":")
+        val versionPart = nameParts.getOrNull(2)?.split(".")
+        if (versionPart != null) {
+            getLibraryReplacement(name, versionPart)?.let { path = it.newPath }
+        }
+        return path
     }
 
     private fun getMinecraftClientArgs(): Array<String> {
         val varArgMap: MutableMap<String, String> = ArrayMap()
+        val token = if (account.accessToken.isNullOrBlank()) "0" else account.accessToken
         
-        // MODIFIED: Cung cấp token giả nếu không có (để vào được game offline)
-        val sessionToken = if (account.accessToken.isNullOrBlank()) "0" else account.accessToken
-        
-        varArgMap["auth_session"] = sessionToken
-        varArgMap["auth_access_token"] = sessionToken
+        varArgMap["auth_session"] = token
+        varArgMap["auth_access_token"] = token
         varArgMap["auth_player_name"] = account.username
         varArgMap["auth_uuid"] = account.profileId.replace("-", "")
         varArgMap["auth_xuid"] = account.xUid ?: ""
@@ -89,33 +148,29 @@ class LaunchArgs(
         varArgMap["game_assets"] = getAssetsHome()
         varArgMap["game_directory"] = gameDirPath.absolutePath
         varArgMap["user_properties"] = "{}"
-        
-        // MODIFIED: Nếu là tài khoản offline thì để user_type là 'legacy' hoặc 'mojang' 
-        // để tránh việc Minecraft cố gắng xác thực với server Microsoft
-        varArgMap["user_type"] = if (account.isLocalAccount()) "legacy" else "msa"
-        
-        varArgMap["version_name"] = version.getVersionInfo()?.minecraftVersion ?: "1.x"
+        varArgMap["user_type"] = "legacy" // Force legacy for local accounts
+        varArgMap["version_name"] = version.getVersionInfo()?.minecraftVersion ?: "1.21.1"
 
         setLauncherInfo(varArgMap)
 
         val minecraftArgs: MutableList<String> = ArrayList()
-        gameManifest.arguments?.apply {
-            game.forEach { if (it is String) minecraftArgs.add(it) }
-        }
+        gameManifest.arguments?.game?.forEach { if (it is String) minecraftArgs.add(it) }
 
         return insertJSONValueList(
-            splitAndFilterEmpty(
-                gameManifest.minecraftArguments ?:
-                minecraftArgs.toTypedArray().joinToString(" ")
-            ), varArgMap
+            (gameManifest.minecraftArguments ?: minecraftArgs.joinToString(" ")).split(" ").filter { it.isNotEmpty() }.toTypedArray(),
+            varArgMap
         )
     }
 
-    // ... [Các hàm phụ trợ khác giữ nguyên để đảm bảo không lỗi compile] ...
-    private fun getLWJGL3ClassPath(): String = "" // Dummy for brevity, use original
-    private fun getMinecraftJVMArgs(): Array<String> = emptyArray() // Dummy for brevity, use original
-    private fun generateLaunchClassPath(gameManifest: GameManifest): String = "" // Use original
-    private fun generateLibClasspath(gameManifest: GameManifest): Array<String> = emptyArray() // Use original
-    private fun splitAndFilterEmpty(arg: String): Array<String> = arg.split(" ").filter { it.isNotEmpty() }.toTypedArray()
-    private fun setLauncherInfo(verArgMap: MutableMap<String, String>) {} // Use original
+    private fun getLWJGL3ClassPath(): String =
+        File(PathManager.DIR_COMPONENTS, "lwjgl3")
+            .listFiles { file -> file.name.endsWith(".jar") }
+            ?.joinToString(":") { it.absolutePath }
+            ?: ""
+
+    private fun setLauncherInfo(verArgMap: MutableMap<String, String>) {
+        verArgMap["launcher_name"] = InfoDistributor.LAUNCHER_NAME
+        verArgMap["launcher_version"] = BuildConfig.VERSION_NAME
+        verArgMap["version_type"] = version.getCustomInfo().takeIf { it.isNotEmptyOrBlank() } ?: gameManifest.type
+    }
 }
