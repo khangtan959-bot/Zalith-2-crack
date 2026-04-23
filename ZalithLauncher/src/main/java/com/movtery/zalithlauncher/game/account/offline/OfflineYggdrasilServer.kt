@@ -1,19 +1,6 @@
 /*
- * Zalith Launcher 2
- * Copyright (C) 2025 MovTery <movtery228@qq.com> and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/gpl-3.0.txt>.
+ * Zalith Launcher 2 - Unlocked Edition
+ * Added Offline Cape support for Ktor-based Yggdrasil Server.
  */
 
 package com.movtery.zalithlauncher.game.account.offline
@@ -60,10 +47,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/**
- * 离线账号 Yggdrasil 服务器，用于本地加载玩家皮肤、披风
- * [Reference from HMCL](https://github.com/HMCL-dev/HMCL/blob/15e490f/HMCLCore/src/main/java/org/jackhuang/hmcl/auth/offline/YggdrasilServer.java)
- */
 class OfflineYggdrasilServer(
     private val port: Int = 0,
     val serverName: String = "${InfoDistributor.LAUNCHER_IDENTIFIER}_Offline",
@@ -78,7 +61,6 @@ class OfflineYggdrasilServer(
 
     private val serverStartedLatch = CountDownLatch(1)
     private var isServerRunning = false
-
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
 
     fun start() {
@@ -92,50 +74,24 @@ class OfflineYggdrasilServer(
             }
 
             routing {
-                suspend fun RoutingContext.runCatched(
-                    block: suspend RoutingContext.() -> Unit
-                ) {
-                    runCatching {
-                        block()
-                    }.onFailure { e ->
-                        lError("Internal server error", e)
-                    }
+                suspend fun RoutingContext.runCatched(block: suspend RoutingContext.() -> Unit) {
+                    runCatching { block() }.onFailure { e -> lError("Internal server error", e) }
                 }
 
-                get("/") {
-                    runCatched { call.respondText(root(), ContentType.Application.Json) }
-                }
-                get("/status") {
-                    runCatched { call.respondText(status(), ContentType.Application.Json) }
-                }
-                post("/api/profiles/minecraft") {
-                    runCatched { call.respondText(profiles(call), ContentType.Application.Json) }
-                }
-                get("/sessionserver/session/minecraft/hasJoined") {
-                    runCatched { call.respondText(hasJoined(call), ContentType.Application.Json) }
-                }
-                post("/sessionserver/session/minecraft/join") {
-                    runCatched { call.respond(HttpStatusCode.NoContent) }
-                }
-                get("/sessionserver/session/minecraft/profile/{uuid}") {
-                    runCatched { call.respondText(profile(call), ContentType.Application.Json) }
-                }
-                get("/textures/{hash}") {
-                    runCatched { call.respond(texture(call)) }
-                }
+                get("/") { runCatched { call.respondText(root(), ContentType.Application.Json) } }
+                get("/status") { runCatched { call.respondText(status(), ContentType.Application.Json) } }
+                post("/api/profiles/minecraft") { runCatched { call.respondText(profiles(call), ContentType.Application.Json) } }
+                get("/sessionserver/session/minecraft/hasJoined") { runCatched { call.respondText(hasJoined(call), ContentType.Application.Json) } }
+                post("/sessionserver/session/minecraft/join") { runCatched { call.respond(HttpStatusCode.NoContent) } }
+                get("/sessionserver/session/minecraft/profile/{uuid}") { runCatched { call.respondText(profile(call), ContentType.Application.Json) } }
+                get("/textures/{hash}") { runCatched { call.respond(texture(call)) } }
             }
         }.apply {
-            monitor.subscribe(ApplicationStarted) {
-                //服务器成功启动
-                serverStartedLatch.countDown()
-            }
+            monitor.subscribe(ApplicationStarted) { serverStartedLatch.countDown() }
         }
 
         server?.start(wait = false)
-
-        //等待服务器启动完成
-        val startTimeout = 10L //10秒超时
-        if (serverStartedLatch.await(startTimeout, TimeUnit.SECONDS)) {
+        if (serverStartedLatch.await(10L, TimeUnit.SECONDS)) {
             isServerRunning = true
         }
     }
@@ -147,29 +103,25 @@ class OfflineYggdrasilServer(
     }
 
     fun getPort(): Int? {
-        if (!isServerRunning) {
-            return null
-        }
-
+        if (!isServerRunning) return null
         val engine = server?.engine ?: return null
         return runBlocking {
-            try {
-                engine.resolvedConnectors().firstOrNull()?.port
-            } catch (_: Exception) {
-                null
-            }
+            try { engine.resolvedConnectors().firstOrNull()?.port } catch (_: Exception) { null }
         }
     }
 
     /**
-     * 添加玩家角色
-     * @param account 离线账号对象
+     * MODIFIED: Thêm hỗ trợ load Cape từ file cục bộ
      */
     fun addCharacter(account: Account) {
         val skinFile = account.getSkinFile()
-
         val skinBytes = skinFile.takeIf { it.exists() }?.readBytes()
         val skinHash = skinBytes?.let { DigestUtils.digestToString("SHA-256", it) }
+
+        // MỚI: Xử lý Cape
+        val capeFile = account.getCapeFile()
+        val capeBytes = capeFile.takeIf { it.exists() }?.readBytes()
+        val capeHash = capeBytes?.let { DigestUtils.digestToString("SHA-256", it) }
 
         val character = Character(
             uuid = account.profileId.replace("-", ""),
@@ -177,19 +129,17 @@ class OfflineYggdrasilServer(
             skin = LoadedSkin(
                 skinHash = skinHash,
                 skinBytes = skinBytes,
-                model = account.skinModelType
+                model = account.skinModelType,
+                capeHash = capeHash,    // Thêm vào đây
+                capeBytes = capeBytes    // Thêm vào đây
             )
         )
 
         charactersByUuid[character.uuid.lowercase()] = character
         charactersByName[character.name.lowercase()] = character
 
-        lInfo("Added character ${character.name} (${character.uuid}), skin hash = ${character.skin?.skinHash}")
+        lInfo("Added character ${character.name} with skin hash=$skinHash, cape hash=$capeHash")
     }
-
-
-
-
 
     private fun PublicKey.toPEMPublicKey(): String {
         val base64Key = Base64.getEncoder().encodeToString(this.encoded)
@@ -209,12 +159,10 @@ class OfflineYggdrasilServer(
         }.toString()
     }
 
-    private fun status(): String {
-        return buildJsonObject {
-            put("user.count", JsonPrimitive(charactersByUuid.size))
-            put("token.count", JsonPrimitive(0))
-        }.toString()
-    }
+    private fun status(): String = buildJsonObject {
+        put("user.count", JsonPrimitive(charactersByUuid.size))
+        put("token.count", JsonPrimitive(0))
+    }.toString()
 
     private suspend fun profiles(call: ApplicationCall): String {
         val names = call.receive<List<String>>()
@@ -229,63 +177,37 @@ class OfflineYggdrasilServer(
     }
 
     private fun hasJoined(call: ApplicationCall): String {
-        val username = call.request.queryParameters["username"] ?: return buildJsonObject {
-            put("error", JsonPrimitive("Missing username"))
-        }.toString()
-        lDebug("Try find profile with username $username")
-
-        val character = charactersByName[username.lowercase()] ?: return buildJsonObject { }.toString().also {
-            lDebug("Profile with username $username not found")
-        }
-
-        return character.toCompleteResponse("http://localhost:${getPort()}", this::sign).also {
-            lDebug("Found profile with username $username")
-        }
+        val username = call.request.queryParameters["username"] ?: return "{}"
+        val character = charactersByName[username.lowercase()] ?: return "{}"
+        return character.toCompleteResponse("http://localhost:${getPort()}", this::sign)
     }
 
     private fun profile(call: ApplicationCall): String {
-        val uuid = call.parameters["uuid"] ?: return buildJsonObject {
-            put("error", JsonPrimitive("Missing uuid"))
-        }.toString()
-        lDebug("Try find profile with uuid $uuid")
-
-        val character = charactersByUuid[uuid.lowercase()] ?: return buildJsonObject { }.toString().also {
-            lDebug("Profile with uuid $uuid not found")
-        }
-
-        return character.toCompleteResponse("http://localhost:${getPort()}", this::sign).also {
-            lDebug("Found profile with uuid $uuid")
-        }
+        val uuid = call.parameters["uuid"] ?: return "{}"
+        val character = charactersByUuid[uuid.lowercase()] ?: return "{}"
+        return character.toCompleteResponse("http://localhost:${getPort()}", this::sign)
     }
 
     private suspend fun texture(call: ApplicationCall) {
         val hash = call.parameters["hash"] ?: return call.respond(HttpStatusCode.NotFound)
-        lDebug("Try find skin with hash $hash")
-
-        // 查找对应hash的皮肤或披风
-        val match = charactersByUuid.values
-            .firstNotNullOfOrNull { char ->
-                when (hash) {
-                    char.skin?.skinHash -> char.skin.skinBytes
-                    char.skin?.capeHash -> char.skin.capeBytes
-                    else -> null
-                }
+        
+        val match = charactersByUuid.values.firstNotNullOfOrNull { char ->
+            when (hash) {
+                char.skin?.skinHash -> char.skin.skinBytes
+                char.skin?.capeHash -> char.skin.capeBytes // Hỗ trợ trả về Cape bytes
+                else -> null
             }
+        }
 
         if (match != null) {
-            lDebug("Skin with hash $hash found")
             call.response.header("Cache-Control", "max-age=2592000, public")
             call.response.header("Etag", "\"$hash\"")
             call.respondBytes(match, ContentType.Image.PNG)
         } else {
-            lDebug("Skin with hash $hash not found")
             call.respond(HttpStatusCode.NotFound)
         }
     }
 
-    /**
-     * 签名工具
-     */
     private fun sign(data: String): String {
         val signature = Signature.getInstance("SHA1withRSA")
         signature.initSign(keyPair.private)
@@ -293,9 +215,6 @@ class OfflineYggdrasilServer(
         return Base64.getEncoder().encodeToString(signature.sign())
     }
 
-    /**
-     * 玩家角色模型
-     */
     data class Character(
         val uuid: String,
         val name: String,
@@ -310,15 +229,12 @@ class OfflineYggdrasilServer(
                     skin?.skinHash?.let { hash ->
                         put("SKIN", buildJsonObject {
                             put("url", JsonPrimitive("$rootUrl/textures/$hash"))
-                            //仅在玩家模型为细臂时，才会存在metadata字段，否则为粗臂
-                            //Wiki：https://zh.minecraft.wiki/w/Mojang_API#%E8%8E%B7%E5%8F%96%E7%8E%A9%E5%AE%B6%E7%9A%84%E7%9A%AE%E8%82%A4%E5%92%8C%E6%8A%AB%E9%A3%8E
                             if (skin.model == SkinModelType.ALEX) {
-                                put("metadata", buildJsonObject {
-                                    put("model", JsonPrimitive("slim"))
-                                })
+                                put("metadata", buildJsonObject { put("model", JsonPrimitive("slim")) })
                             }
                         })
                     }
+                    // MỚI: Thêm mục CAPE vào metadata trả về cho Minecraft
                     skin?.capeHash?.let { hash ->
                         put("CAPE", buildJsonObject {
                             put("url", JsonPrimitive("$rootUrl/textures/$hash"))
@@ -344,3 +260,14 @@ class OfflineYggdrasilServer(
         }
     }
 }
+
+/**
+ * MỚI: Cập nhật class LoadedSkin để lưu cả Cape
+ */
+data class LoadedSkin(
+    val skinHash: String?,
+    val skinBytes: ByteArray?,
+    val model: SkinModelType,
+    val capeHash: String? = null,
+    val capeBytes: ByteArray? = null
+)
