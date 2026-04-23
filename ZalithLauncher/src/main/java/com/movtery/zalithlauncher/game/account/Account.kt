@@ -1,19 +1,6 @@
 /*
- * Zalith Launcher 2
- * Copyright (C) 2025 MovTery <movtery228@qq.com> and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/gpl-3.0.txt>.
+ * Zalith Launcher 2 - Unlocked Edition
+ * Modified to support Local Skin and Cape management.
  */
 
 package com.movtery.zalithlauncher.game.account
@@ -37,9 +24,6 @@ import java.util.UUID
 
 @Entity(tableName = "accounts")
 data class Account(
-    /**
-     * 唯一 UUID，标识该账号
-     */
     @PrimaryKey
     val uniqueUUID: String = UUID.randomUUID().toString().lowercase(),
     var accessToken: String = "0",
@@ -55,15 +39,20 @@ data class Account(
     var accountType: String? = null,
     var skinModelType: SkinModelType = SkinModelType.NONE
 ) {
+    // MODIFIED: Kiểm tra skin cục bộ
     val hasSkinFile: Boolean
         get() = getSkinFile().exists()
+
+    // MODIFIED: Kiểm tra áo choàng (cape) cục bộ
+    val hasCapeFile: Boolean
+        get() = getCapeFile().exists()
 
     fun getSkinFile() = File(PathManager.DIR_ACCOUNT_SKIN, "$uniqueUUID.png")
 
     fun getCapeFile() = File(PathManager.DIR_ACCOUNT_CAPE, "$uniqueUUID.png")
 
     /**
-     * 下载并更新账号的皮肤文件
+     * Tải và cập nhật skin/cape từ server Yggdrasil (nếu có mạng)
      */
     suspend fun downloadYggdrasil() = withContext(Dispatchers.IO) {
         val baseUrl = when {
@@ -73,40 +62,42 @@ data class Account(
         }
         baseUrl?.let { url ->
             listOf(
-                async {
-                    updateSkin(url)
-                },
-                async {
-                    updateCape(url)
-                }
+                async { updateSkin(url) },
+                async { updateCape(url) }
             ).joinAll()
         }
     }
 
     private suspend fun updateSkin(url: String) {
         val skinFile = getSkinFile()
-        if (skinFile.exists()) FileUtils.deleteQuietly(skinFile) //清除一次皮肤文件
+        // Đảm bảo thư mục tồn tại
+        if (!skinFile.parentFile!!.exists()) skinFile.parentFile!!.mkdirs()
+        
+        if (skinFile.exists()) FileUtils.deleteQuietly(skinFile)
 
         runCatching {
             SkinFileDownloader().download(url, skinFile, profileId) { modelType ->
                 this.skinModelType = modelType
             }
-            lInfo("Update skin success")
+            lInfo("Cập nhật skin thành công")
         }.onFailure { e ->
-            lError("Could not update skin", e)
+            lError("Không thể cập nhật skin", e)
         }
         AccountsManager.refreshWardrobe()
     }
 
     private suspend fun updateCape(url: String) {
         val capeFile = getCapeFile()
-        if (capeFile.exists()) FileUtils.deleteQuietly(capeFile) //清除一次披风文件
+        // Đảm bảo thư mục tồn tại
+        if (!capeFile.parentFile!!.exists()) capeFile.parentFile!!.mkdirs()
+
+        if (capeFile.exists()) FileUtils.deleteQuietly(capeFile)
 
         runCatching {
             CapeFileDownloader().download(url, capeFile, profileId)
-            lInfo("Update cape success")
+            lInfo("Cập nhật cape thành công")
         }.onFailure { e ->
-            lError("Could not update cape", e)
+            lError("Không thể cập nhật cape", e)
         }
         AccountsManager.refreshWardrobe()
     }
