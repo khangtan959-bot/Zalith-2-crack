@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: 'Chọn bản build (Release hoặc Debug)'
+        description: 'Chọn bản build (Khuyên dùng Debug nếu không có mật khẩu JKS)'
         required: true
-        default: 'Release'
+        default: 'Debug'
         type: choice
         options:
-          - Release
           - Debug
+          - Release
 
 jobs:
   build:
@@ -34,10 +34,13 @@ jobs:
       - name: Build APK for arm64
         run: |
           chmod +x gradlew
-          ./gradlew ZalithLauncher:assemble${{ github.event.inputs.variant }} -Darch=arm64
+          # Nếu chọn Release, lệnh này sẽ cố gắng build mà không bắt lỗi signing quá chặt chẽ
+          ./gradlew ZalithLauncher:assemble${{ github.event.inputs.variant }} -Darch=arm64 -Pandroid.injected.signing.store.password="" -Pandroid.injected.signing.key.password=""
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Zalith-2-${{ github.event.inputs.variant }}-arm64
-          path: ZalithLauncher/build/outputs/apk/${{ github.event.inputs.variant == 'Release' && 'release' || 'debug' }}/*.apk
+          path: |
+            ZalithLauncher/build/outputs/apk/debug/*.apk
+            ZalithLauncher/build/outputs/apk/release/*.apk
