@@ -166,25 +166,30 @@ class GameLauncher(
         disableSplash(gameDirPath)
 
         this.runtime = runtime
-        val runtimeLibraryPath = getRuntimeLibraryPath()
-
+        
         // --- SỬA LỖI TẠI ĐÂY ---
-        // Loại bỏ các tham số named parameter không tồn tại và gọi đúng logic mới
-        val launchArgs = LaunchArgs(
-            runtimeLibraryPath = runtimeLibraryPath,
-            account = account,
-            offlineServer = offlineServer,
-            gameDirPath = gameDirPath,
+        // Constructor của LaunchArgs trong bản của bạn có thể chỉ nhận account và offlineServer
+        // hoặc các tham số không có tên (positional parameters)
+        val launchArgsObj = LaunchArgs(
+            account,
+            offlineServer
+        )
+        
+        // Theo log, hàm getArgs không tìm thấy. Thử sử dụng biến hoặc hàm đúng:
+        // Trong Zalith 2 mới nhất, nó thường là một thuộc tính hoặc hàm lấy danh sách args
+        val jvmArgs = launchArgsObj.getLaunchArgs(
+            activity = activity,
             version = version,
             gameManifest = gameManifest,
-            runtime = runtime
-        ).getArgs(activity, screenSize) // Sử dụng getArgs thay vì getAllArgs
+            runtime = runtime,
+            screenSize = screenSize
+        )
 
         tryStartTouchProxy()
 
         return launchJvm(
             context = activity,
-            jvmArgs = launchArgs,
+            jvmArgs = jvmArgs,
             userArgs = customArgs,
             screenSize = screenSize
         )
